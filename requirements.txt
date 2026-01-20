@@ -1,0 +1,7 @@
+Django>=4.2
+djangorestframework
+mysqlclient
+redis
+django-redis
+django-elasticsearch-dsl
+gunicorn

@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  # 1. Django API Server (Web)
+  web:
+    build: .
+    container_name: purepick-backend
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+      - elasticsearch
+    environment:
+      - MYSQL_HOST=db
+      - REDIS_HOST=redis
+      - ELASTICSEARCH_HOST=elasticsearch
+
+  # 2. MySQL (Main Database)
+  db:
+    image: mysql:8.0
+    container_name: purepick-db
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_DATABASE: purepick
+      MYSQL_USER: user
+      MYSQL_PASSWORD: password
+      MYSQL_ROOT_PASSWORD: rootpassword
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+
+  # 3. Redis (Cache & Ranking)
+  redis:
+    image: redis:alpine
+    container_name: purepick-redis
+    ports:
+      - "6379:6379"
+
+  # 4. Elasticsearch (Search Engine)
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.9
+    container_name: purepick-es
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"  # 메모리 제한 (로컬 부하 방지)
+      - xpack.security.enabled=false       # 개발 편의를 위해 보안 비활성화
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  # 5. Kibana (ES Visualization - Optional but Recommended)
+  # 브라우저에서 localhost:5601 접속해서 데이터 확인 가능
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.17.9
+    container_name: purepick-kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+
+volumes:
+  mysql_data:
+  es_data:

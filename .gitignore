@@ -1,0 +1,44 @@
+# --- Python & Virtual Environment ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env/
+
+# --- Django ---
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+
+# --- Environment Variables & Secrets (중요 ⭐) ---
+.env
+.env.*
+! .env.example
+
+# --- Operating System (macOS/Windows/Linux) ---
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# --- IDE & Editors ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Docker & Data Volumes ---
+# docker-compose에서 볼륨으로 마운트된 데이터가
+# 혹시라도 로컬 폴더에 생성될 경우를 대비해 제외
+mysql_data/
+es_data/
+redis_data/
+
+# --- Pytest ---
+.pytest_cache/
+htmlcov/
+.coverage
