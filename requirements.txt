@@ -5,3 +5,4 @@ redis
 django-redis
 django-elasticsearch-dsl
 gunicorn
+Faker>=19.0.0
