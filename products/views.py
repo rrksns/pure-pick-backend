@@ -1,10 +1,13 @@
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from django.core.cache import cache             # Django 캐시 모듈
+from django_redis import get_redis_connection   # Redis 직접 제어 (랭킹용)
+from elasticsearch_dsl import Q
+
 from .models import Product
 from .serializers import ProductSerializer
 from .documents import ProductDocument
-from elasticsearch_dsl import Q
 
 class ProductViewSet(viewsets.ModelViewSet):
     """
@@ -21,6 +24,19 @@ class ProductViewSet(viewsets.ModelViewSet):
         if not query:
             return Response({'error': '검색어를 입력해주세요.'}, status=400)
 
+        # [Step 1] Redis 캐시 확인 (Key: search:검색어)
+        cache_key = f"search:{query}"
+        cached_result = cache.get(cache_key)
+
+        if cached_result:
+            print(f"⚡ Cache Hit! (Redis에서 가져옴): {query}")
+            # 캐시가 있어도 랭킹 점수는 올려야 함!
+            self._add_ranking(query)
+            return Response(cached_result)
+
+        # [Step 2] 캐시 없으면 Elasticsearch 검색
+        print(f"🐢 Cache Miss... (ES 검색 수행): {query}")
+
         # Elasticsearch Query (DSL)
         # 상품명(name), 브랜드명(brand.name), 성분명(ingredients.name)에서 다 찾음!
         # fuzzy: 오타가 있어도 찾아줌 (ex: '토너' -> '투너')
@@ -33,6 +49,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         search_result = ProductDocument.search().query(q)
         response = search_result.execute()
 
+        # [Step 3] DB에서 상세 정보 조회
         # 결과 변환 (ES 데이터를 바로 줄 수도 있지만, 일관성을 위해 Serializer 태움)
         # *주의: 실무에선 DB 다시 조회 안 하고 ES 결과(_source)를 바로 줍니다. (속도 위해)
         # 여기선 간단하게 ID로 DB 다시 조회하는 방식으로 구현합니다.
@@ -41,5 +58,33 @@ class ProductViewSet(viewsets.ModelViewSet):
         # MySQL에서 순서대로 가져오기 (preserve_order)
         products = Product.objects.filter(id__in=product_ids)
         serializer = self.get_serializer(products, many=True)
+        data = serializer.data
+
+        # [Step 4] 결과 Redis에 저장 (유효시간 1시간 = 3600초)
+        cache.set(cache_key, data, timeout=60*60)
+
+        # [Step 5] 랭킹 집계
+        self._add_ranking(query)
 
         return Response(serializer.data)
+
+    # 2. 랭킹 집계 함수 (내부 호출용)
+    def _add_ranking(self, keyword):
+        con = get_redis_connection("default")
+        # Sorted Set(ZSET) 자료구조 사용: 점수 1점 증가 (ZINCRBY)
+        con.zincrby("search_ranking", 1, keyword)
+
+    # 3. 실시간 검색어 순위 조회 API
+    @action(detail=False, methods=['get'])
+    def ranking(self, request):
+        con = get_redis_connection("default")
+        # 점수 높은 순으로 상위 10개 가져오기 (ZREVRANGE 0 -1)
+        # withscores=True: 점수도 같이 반환
+        ranks = con.zrevrange("search_ranking", 0, 9, withscores=True)
+
+        # 보기 좋게 JSON 변환
+        result = [
+            {"rank": i+1, "keyword": keyword.decode('utf-8'), "score": int(score)}
+            for i, (keyword, score) in enumerate(ranks)
+        ]
+        return Response(result)

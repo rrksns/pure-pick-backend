@@ -90,6 +90,17 @@ DATABASES = {
     }
 }
 
+# Redis 캐시 설정 (django-redis 라이브러리 사용)
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": "redis://redis:6379/1", # 1번 DB 사용 (0번은 보통 시스템용)
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        }
+    }
+}
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
