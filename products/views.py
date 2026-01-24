@@ -9,6 +9,10 @@ from .models import Product
 from .serializers import ProductSerializer
 from .documents import ProductDocument
 
+# --- Swagger용 임포트 추가 ---
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
+
 class ProductViewSet(viewsets.ModelViewSet):
     """
     상품 조회, 생성, 수정, 삭제 API
@@ -17,6 +21,20 @@ class ProductViewSet(viewsets.ModelViewSet):
     serializer_class = ProductSerializer
 
     # 핵심: /api/products/items/search/?q=검색어
+    # [1] 검색 API 꾸미기
+    @swagger_auto_schema(
+        operation_summary="통합 상품 검색 (MySQL + ES)",
+        operation_description="상품명, 브랜드명, 성분명을 통합 검색합니다. (Redis 캐싱 적용)",
+        manual_parameters=[
+            openapi.Parameter(
+                'q',
+                openapi.IN_QUERY,
+                description='검색어 (예: 토너, 이니스프리)',
+                type=openapi.TYPE_STRING,
+                required=True
+            )
+        ]
+    )
     @action(detail=False, methods=['get'])
     def search(self, request):
         query = request.query_params.get('q', '')
@@ -75,6 +93,11 @@ class ProductViewSet(viewsets.ModelViewSet):
         con.zincrby("search_ranking", 1, keyword)
 
     # 3. 실시간 검색어 순위 조회 API
+    # [2] 랭킹 API 꾸미기
+    @swagger_auto_schema(
+        operation_summary="실시간 인기 검색어 순위",
+        operation_description="Redis에 집계된 실시간 검색어 Top 10을 반환합니다."
+    )
     @action(detail=False, methods=['get'])
     def ranking(self, request):
         con = get_redis_connection("default")
