@@ -10,3 +10,4 @@ Faker>=19.0.0
 django-elasticsearch-dsl>=7.3,<8.0
 elasticsearch-dsl>=7.0,<8.0
 elasticsearch>=7.0,<8.0
+drf-yasg

@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     'rest_framework',  # API 개발용
     'django_elasticsearch_dsl',
     'products',        # 방금 만든 앱
+    'drf_yasg',
 ]
 
 MIDDLEWARE = [

@@ -11,9 +11,12 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - db
-      - redis
-      - elasticsearch
+      db:
+        condition: service_healthy  # <--- 핵심! 그냥 db가 켜지는 게 아니라, 건강해질 때까지 기다림
+      elasticsearch:
+        condition: service_started
+      redis:
+        condition: service_started
     environment:
       - PYTHONUNBUFFERED=1 #python 로그 즉시 출력
       - MYSQL_HOST=db
@@ -24,6 +27,14 @@ services:
   db:
     image: mysql:8.0
     container_name: purepick-db
+
+    # [추가 1] MySQL 스스로 건강 상태 체크하기
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost" ]
+      interval: 10s    # 10초마다 검사
+      timeout: 5s      # 5초 안에 응답 없으면 실패 처리
+      retries: 5       # 5번 실패하면 진짜 죽은 걸로 간주
+
     ports:
       - "3306:3306"
     environment:
