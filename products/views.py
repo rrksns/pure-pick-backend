@@ -1,9 +1,12 @@
-from rest_framework import viewsets
+import logging
+from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.core.cache import cache             # Django 캐시 모듈
 from django_redis import get_redis_connection   # Redis 직접 제어 (랭킹용)
 from elasticsearch_dsl import Q
+from elasticsearch.exceptions import ConnectionError as ESConnectionError
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from .models import Product
 from .serializers import ProductSerializer
@@ -12,6 +15,9 @@ from .documents import ProductDocument
 # --- Swagger용 임포트 추가 ---
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
+
+# 로깅 설정
+logger = logging.getLogger(__name__)
 
 class ProductViewSet(viewsets.ModelViewSet):
     """
@@ -37,77 +43,208 @@ class ProductViewSet(viewsets.ModelViewSet):
     )
     @action(detail=False, methods=['get'])
     def search(self, request):
-        query = request.query_params.get('q', '')
+        """
+        상품 검색 API
 
-        if not query:
-            return Response({'error': '검색어를 입력해주세요.'}, status=400)
+        쿼리 파라미터:
+        - q: 검색어 (필수, 최소 1자, 최대 100자)
 
-        # [Step 1] Redis 캐시 확인 (Key: search:검색어)
-        cache_key = f"search:{query}"
-        cached_result = cache.get(cache_key)
+        반환:
+        - 검색 결과 상품 리스트 (배열)
+        - 캐시 히트 시 빠른 응답, 미스 시 Elasticsearch에서 검색
 
-        if cached_result:
-            print(f"⚡ Cache Hit! (Redis에서 가져옴): {query}")
-            # 캐시가 있어도 랭킹 점수는 올려야 함!
+        에러 코드:
+        - 400: 검색어 미입력 또는 유효하지 않음
+        - 503: Elasticsearch 또는 Redis 연결 불가
+        - 500: 예상치 못한 서버 오류
+        """
+        try:
+            # [Step 0] 입력값 검증
+            query = request.query_params.get('q', '').strip()
+
+            # 검색어 유효성 검사
+            if not query:
+                logger.warning("검색 요청: 빈 검색어")
+                return Response(
+                    {'error': '검색어를 입력해주세요.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if len(query) > 100:
+                logger.warning(f"검색 요청: 검색어 길이 초과 ({len(query)}자)")
+                return Response(
+                    {'error': '검색어는 100자 이하여야 합니다.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # [Step 1] Redis 캐시 확인 (Key: search:검색어)
+            cache_key = f"search:{query}"
+
+            try:
+                cached_result = cache.get(cache_key)
+                if cached_result:
+                    logger.info(f"캐시 히트: {query}")
+                    # 캐시가 있어도 랭킹 점수는 올려야 함!
+                    self._add_ranking(query)
+                    return Response(cached_result)
+            except Exception as e:
+                logger.warning(f"캐시 조회 실패: {str(e)}")
+                # 캐시 실패해도 계속 진행
+
+            # [Step 2] 캐시 없으면 Elasticsearch 검색
+            logger.info(f"캐시 미스, Elasticsearch 검색 시작: {query}")
+
+            try:
+                # Elasticsearch Query (DSL)
+                # 상품명(name), 브랜드명(brand.name), 성분명(ingredients.name)에서 다 찾음!
+                # fuzzy: 오타가 있어도 찾아줌 (ex: '토너' -> '투너')
+                q = Q('multi_match',
+                      query=query,
+                      fields=['name', 'brand.name', 'ingredients.name'],
+                      fuzziness='AUTO')
+
+                # 검색 실행
+                search_result = ProductDocument.search().query(q)
+                response = search_result.execute()
+
+            except ESConnectionError as e:
+                logger.error(f"Elasticsearch 연결 실패: {e.__class__.__name__}")
+                return Response(
+                    {
+                        'error': 'Elasticsearch 서비스에 연결할 수 없습니다.',
+                        'detail': '검색 기능을 일시적으로 사용할 수 없습니다.'
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
+            except Exception as e:
+                logger.error(f"Elasticsearch 검색 오류: {e.__class__.__name__}: {str(e)}")
+                return Response(
+                    {
+                        'error': '검색 중 오류가 발생했습니다.',
+                        'detail': str(e)
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            # [Step 3] DB에서 상세 정보 조회
+            try:
+                product_ids = [hit.meta.id for hit in response]
+
+                if not product_ids:
+                    # 결과가 없어도 에러가 아님
+                    logger.info(f"검색 결과 없음: {query}")
+                    empty_data = []
+                    try:
+                        cache.set(cache_key, empty_data, timeout=60*60)
+                    except Exception as e:
+                        logger.warning(f"빈 결과 캐싱 실패: {str(e)}")
+                    return Response(empty_data)
+
+                # MySQL에서 순서대로 가져오기
+                products = Product.objects.filter(id__in=product_ids)
+                serializer = self.get_serializer(products, many=True)
+                data = serializer.data
+
+            except Exception as e:
+                logger.error(f"데이터베이스 조회 오류: {str(e)}")
+                return Response(
+                    {
+                        'error': '데이터를 조회할 수 없습니다.',
+                        'detail': str(e)
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            # [Step 4] 결과 Redis에 저장 (유효시간 1시간 = 3600초)
+            try:
+                cache.set(cache_key, data, timeout=60*60)
+                logger.debug(f"검색 결과 캐싱 완료: {query}")
+            except Exception as e:
+                logger.warning(f"검색 결과 캐싱 실패 (계속 진행): {str(e)}")
+
+            # [Step 5] 랭킹 집계
             self._add_ranking(query)
-            return Response(cached_result)
 
-        # [Step 2] 캐시 없으면 Elasticsearch 검색
-        print(f"🐢 Cache Miss... (ES 검색 수행): {query}")
+            return Response(data)
 
-        # Elasticsearch Query (DSL)
-        # 상품명(name), 브랜드명(brand.name), 성분명(ingredients.name)에서 다 찾음!
-        # fuzzy: 오타가 있어도 찾아줌 (ex: '토너' -> '투너')
-        q = Q('multi_match',
-              query=query,
-              fields=['name', 'brand.name', 'ingredients.name'],
-              fuzziness='AUTO')
+        except Exception as e:
+            logger.exception(f"검색 API 예상치 못한 오류: {str(e)}")
+            return Response(
+                {
+                    'error': '예상치 못한 오류가 발생했습니다.',
+                    'detail': str(e)
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
-        # 검색 실행
-        search_result = ProductDocument.search().query(q)
-        response = search_result.execute()
+    def _add_ranking(self, keyword: str) -> None:
+        """
+        검색어 랭킹 점수 증가
 
-        # [Step 3] DB에서 상세 정보 조회
-        # 결과 변환 (ES 데이터를 바로 줄 수도 있지만, 일관성을 위해 Serializer 태움)
-        # *주의: 실무에선 DB 다시 조회 안 하고 ES 결과(_source)를 바로 줍니다. (속도 위해)
-        # 여기선 간단하게 ID로 DB 다시 조회하는 방식으로 구현합니다.
-        product_ids = [hit.meta.id for hit in response]
+        Args:
+            keyword: 증가시킬 검색어
 
-        # MySQL에서 순서대로 가져오기 (preserve_order)
-        products = Product.objects.filter(id__in=product_ids)
-        serializer = self.get_serializer(products, many=True)
-        data = serializer.data
+        Note:
+            Redis 연결 실패 시 로그만 기록하고 계속 진행
+            (랭킹은 부가 기능이므로 실패해도 검색은 진행)
+        """
+        try:
+            con = get_redis_connection("default")
+            # Sorted Set(ZSET) 자료구조 사용: 점수 1점 증가 (ZINCRBY)
+            con.zincrby("search_ranking", 1, keyword)
+            logger.debug(f"랭킹 업데이트: {keyword}")
+        except RedisConnectionError as e:
+            logger.error(f"Redis 연결 실패 (랭킹 업데이트 스킵): {str(e)}")
+        except Exception as e:
+            logger.error(f"랭킹 업데이트 오류: {str(e)}")
 
-        # [Step 4] 결과 Redis에 저장 (유효시간 1시간 = 3600초)
-        cache.set(cache_key, data, timeout=60*60)
-
-        # [Step 5] 랭킹 집계
-        self._add_ranking(query)
-
-        return Response(serializer.data)
-
-    # 2. 랭킹 집계 함수 (내부 호출용)
-    def _add_ranking(self, keyword):
-        con = get_redis_connection("default")
-        # Sorted Set(ZSET) 자료구조 사용: 점수 1점 증가 (ZINCRBY)
-        con.zincrby("search_ranking", 1, keyword)
-
-    # 3. 실시간 검색어 순위 조회 API
-    # [2] 랭킹 API 꾸미기
     @swagger_auto_schema(
         operation_summary="실시간 인기 검색어 순위",
         operation_description="Redis에 집계된 실시간 검색어 Top 10을 반환합니다."
     )
     @action(detail=False, methods=['get'])
     def ranking(self, request):
-        con = get_redis_connection("default")
-        # 점수 높은 순으로 상위 10개 가져오기 (ZREVRANGE 0 -1)
-        # withscores=True: 점수도 같이 반환
-        ranks = con.zrevrange("search_ranking", 0, 9, withscores=True)
+        """
+        실시간 인기 검색어 순위 조회
 
-        # 보기 좋게 JSON 변환
-        result = [
-            {"rank": i+1, "keyword": keyword.decode('utf-8'), "score": int(score)}
-            for i, (keyword, score) in enumerate(ranks)
-        ]
-        return Response(result)
+        반환:
+        - 상위 10개의 인기 검색어 (rank, keyword, score)
+        - 점수 높은 순으로 정렬
+
+        에러 코드:
+        - 503: Redis 연결 불가
+        - 500: 예상치 못한 서버 오류
+        """
+        try:
+            con = get_redis_connection("default")
+            # 점수 높은 순으로 상위 10개 가져오기 (ZREVRANGE 0 -1)
+            # withscores=True: 점수도 같이 반환
+            ranks = con.zrevrange("search_ranking", 0, 9, withscores=True)
+
+            # 보기 좋게 JSON 변환
+            result = [
+                {"rank": i+1, "keyword": keyword.decode('utf-8'), "score": int(score)}
+                for i, (keyword, score) in enumerate(ranks)
+            ]
+
+            logger.info(f"랭킹 조회 완료 (결과 수: {len(result)})")
+            return Response(result)
+
+        except RedisConnectionError as e:
+            logger.error(f"Redis 연결 실패 (랭킹 조회): {str(e)}")
+            return Response(
+                {
+                    'error': 'Redis 서비스에 연결할 수 없습니다.',
+                    'detail': '인기 검색어 기능을 일시적으로 사용할 수 없습니다.'
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        except Exception as e:
+            logger.error(f"랭킹 조회 오류: {str(e)}")
+            return Response(
+                {
+                    'error': '인기 검색어를 조회할 수 없습니다.',
+                    'detail': str(e)
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
