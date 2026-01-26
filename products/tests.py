@@ -140,7 +140,10 @@ class ProductSearchAPITests(TransactionTestCase):
         response = self.client.get(url, {'q': 'toner'})
 
         self.assertEqual(response.status_code, 200)
-        self.assertIsInstance(response.json(), list)
+        data = response.json()
+        self.assertIsInstance(data, dict)
+        self.assertIn('results', data)
+        self.assertIn('count', data)
 
     @patch('products.views.ProductDocument.search')
     def test_search_caching_hit(self, mock_search):
@@ -384,7 +387,9 @@ class ProductSearchErrorHandlingTests(TransactionTestCase):
         response = self.client.get(url, {'q': 'nonexistent'})
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), [])
+        data = response.json()
+        self.assertEqual(data['count'], 0)
+        self.assertEqual(data['results'], [])
 
     @patch('products.views.get_redis_connection')
     @patch('products.views.ProductDocument.search')
@@ -467,7 +472,10 @@ class ProductListAPITests(TestCase):
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, 200)
-        self.assertIsInstance(response.json(), list)
+        data = response.json()
+        self.assertIsInstance(data, dict)
+        self.assertIn('results', data)
+        self.assertIn('count', data)
         self.assertGreaterEqual(len(response.json()), 2)
 
     def test_retrieve_product(self):

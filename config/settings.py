@@ -204,6 +204,12 @@ ELASTICSEARCH_DSL = {
     },
 }
 
+# REST Framework 페이지네이션 설정
+REST_FRAMEWORK = {
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 20,
+}
+
 # 테스트 환경 설정
 if 'test' in sys.argv:
     # 테스트용 별도 데이터베이스

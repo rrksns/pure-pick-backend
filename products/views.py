@@ -32,7 +32,7 @@ class ProductViewSet(viewsets.ModelViewSet):
     # [1] 검색 API 꾸미기
     @swagger_auto_schema(
         operation_summary="통합 상품 검색 (MySQL + ES)",
-        operation_description="상품명, 브랜드명, 성분명을 통합 검색합니다. (Redis 캐싱 적용)",
+        operation_description="상품명, 브랜드명, 성분명을 통합 검색합니다. (Redis 캐싱 적용, 페이지네이션 지원)",
         manual_parameters=[
             openapi.Parameter(
                 'q',
@@ -40,7 +40,21 @@ class ProductViewSet(viewsets.ModelViewSet):
                 description='검색어 (예: 토너, 이니스프리)',
                 type=openapi.TYPE_STRING,
                 required=True
-            )
+            ),
+            openapi.Parameter(
+                'page',
+                openapi.IN_QUERY,
+                description='페이지 번호 (기본값: 1)',
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'page_size',
+                openapi.IN_QUERY,
+                description='페이지당 결과 수 (기본값: 20)',
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
         ]
     )
     @action(detail=False, methods=['get'])
@@ -135,17 +149,29 @@ class ProductViewSet(viewsets.ModelViewSet):
                 if not product_ids:
                     # 결과가 없어도 에러가 아님
                     logger.info(f"검색 결과 없음: {query}")
-                    empty_data = []
+                    empty_response = {
+                        'count': 0,
+                        'next': None,
+                        'previous': None,
+                        'results': []
+                    }
                     try:
-                        cache.set(cache_key, empty_data, timeout=60*60)
+                        cache.set(cache_key, empty_response, timeout=60*60)
                     except Exception as e:
                         logger.warning(f"빈 결과 캐싱 실패: {str(e)}")
-                    return Response(empty_data)
+                    return Response(empty_response)
 
                 # MySQL에서 순서대로 가져오기
                 products = Product.objects.filter(id__in=product_ids)
-                serializer = self.get_serializer(products, many=True)
-                data = serializer.data
+
+                # 페이지네이션 적용
+                page = self.paginate_queryset(products)
+                if page is not None:
+                    serializer = self.get_serializer(page, many=True)
+                    data = self.get_paginated_response(serializer.data).data
+                else:
+                    serializer = self.get_serializer(products, many=True)
+                    data = serializer.data
 
             except Exception as e:
                 logger.error(f"데이터베이스 조회 오류: {str(e)}")
