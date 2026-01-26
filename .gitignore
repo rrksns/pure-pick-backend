@@ -42,3 +42,6 @@ redis_data/
 .pytest_cache/
 htmlcov/
 .coverage
+# Local documentation
+PROGRESS.md
+NEXT_STEPS.md
