@@ -1,4 +1,5 @@
 from django.db import models
+from typing import Optional
 
 class TimeStampedModel(models.Model):
     """
@@ -16,7 +17,7 @@ class Brand(TimeStampedModel):
     name = models.CharField(max_length=100, db_index=True)  # 검색 성능을 위해 인덱스 추가
     website_url = models.URLField(blank=True, null=True)
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
 class Ingredient(TimeStampedModel):
@@ -28,7 +29,7 @@ class Ingredient(TimeStampedModel):
     ewg_score = models.IntegerField(default=1, help_text="1~10 사이의 EWG 안전 등급")
     description = models.TextField(blank=True)
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"{self.name} (EWG: {self.ewg_score})"
 
 class Product(TimeStampedModel):
@@ -47,5 +48,5 @@ class Product(TimeStampedModel):
     class Meta:
         ordering = ['-id']  # 최신순 정렬 기본
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name

@@ -1,6 +1,8 @@
 import logging
+from typing import Dict, List, Any, Optional
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.request import Request
 from rest_framework.response import Response
 from django.core.cache import cache             # Django 캐시 모듈
 from django_redis import get_redis_connection   # Redis 직접 제어 (랭킹용)
@@ -42,7 +44,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         ]
     )
     @action(detail=False, methods=['get'])
-    def search(self, request):
+    def search(self, request: Request) -> Response:
         """
         상품 검색 API
 
@@ -203,7 +205,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         operation_description="Redis에 집계된 실시간 검색어 Top 10을 반환합니다."
     )
     @action(detail=False, methods=['get'])
-    def ranking(self, request):
+    def ranking(self, request: Request) -> Response:
         """
         실시간 인기 검색어 순위 조회
 

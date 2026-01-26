@@ -1,3 +1,4 @@
+from typing import Dict, Any
 from rest_framework import serializers
 from .models import Brand, Ingredient, Product
 
