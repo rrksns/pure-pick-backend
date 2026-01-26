@@ -6,6 +6,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from django.core.cache import cache             # Django 캐시 모듈
 from django_redis import get_redis_connection   # Redis 직접 제어 (랭킹용)
+from django.db.models import Case, When, Value, IntegerField
 from elasticsearch_dsl import Q
 from elasticsearch.exceptions import ConnectionError as ESConnectionError
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -161,8 +162,15 @@ class ProductViewSet(viewsets.ModelViewSet):
                         logger.warning(f"빈 결과 캐싱 실패: {str(e)}")
                     return Response(empty_response)
 
-                # MySQL에서 순서대로 가져오기
-                products = Product.objects.filter(id__in=product_ids)
+                # MySQL에서 순서대로 가져오기 (Elasticsearch 순서 보존)
+                # Case/When을 사용하여 원래 검색 순서 유지
+                preserved_order = Case(
+                    *[When(pk=pk, then=Value(i)) for i, pk in enumerate(product_ids)],
+                    output_field=IntegerField()
+                )
+                products = Product.objects.filter(id__in=product_ids).annotate(
+                    _order=preserved_order
+                ).order_by('_order').select_related('brand').prefetch_related('ingredients')
 
                 # 페이지네이션 적용
                 page = self.paginate_queryset(products)
@@ -183,10 +191,11 @@ class ProductViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
 
-            # [Step 4] 결과 Redis에 저장 (유효시간 1시간 = 3600초)
+            # [Step 4] 결과 Redis에 저장 (동적 TTL: 인기도 기반)
             try:
-                cache.set(cache_key, data, timeout=60*60)
-                logger.debug(f"검색 결과 캐싱 완료: {query}")
+                cache_ttl = self._get_cache_ttl(query)
+                cache.set(cache_key, data, timeout=cache_ttl)
+                logger.debug(f"검색 결과 캐싱 완료: {query} (TTL: {cache_ttl}초)")
             except Exception as e:
                 logger.warning(f"검색 결과 캐싱 실패 (계속 진행): {str(e)}")
 
@@ -204,6 +213,39 @@ class ProductViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    def _get_cache_ttl(self, keyword: str) -> int:
+        """
+        검색어 인기도를 기반으로 동적 캐시 TTL 결정
+
+        Args:
+            keyword: 검색 키워드
+
+        Returns:
+            캐시 유효시간 (초 단위)
+            - 인기 검색어 (점수 > 10): 2시간 (7200초)
+            - 일반 검색어 (2 <= 점수 <= 10): 1시간 (3600초)
+            - 저인기 검색어 (점수 < 2): 30분 (1800초)
+        """
+        try:
+            con = get_redis_connection("default")
+            ranking_score = con.zscore("search_ranking", keyword)
+
+            if ranking_score is None:
+                ranking_score = 0
+
+            if ranking_score > 10:
+                logger.debug(f"높은 인기도 캐싱: {keyword} (TTL: 7200초)")
+                return 7200  # 2시간
+            elif ranking_score >= 2:
+                logger.debug(f"중간 인기도 캐싱: {keyword} (TTL: 3600초)")
+                return 3600  # 1시간
+            else:
+                logger.debug(f"낮은 인기도 캐싱: {keyword} (TTL: 1800초)")
+                return 1800  # 30분
+        except Exception as e:
+            logger.warning(f"캐시 TTL 결정 오류, 기본값 사용: {str(e)}")
+            return 3600  # 기본값: 1시간
 
     def _add_ranking(self, keyword: str) -> None:
         """

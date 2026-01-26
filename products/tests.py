@@ -534,3 +534,95 @@ class ProductListAPITests(TestCase):
 
         self.assertEqual(response.status_code, 204)
         self.assertFalse(Product.objects.filter(id=self.product1.id).exists())
+
+
+class ProductSearchPerformanceTests(TestCase):
+    """검색 API 성능 최적화 테스트"""
+
+    def setUp(self):
+        """테스트 데이터 생성"""
+        self.brand = Brand.objects.create(name="Performance Brand", website_url="https://test.com")
+
+        # 10개의 상품 생성 (성능 테스트용)
+        self.products = []
+        for i in range(10):
+            product = Product.objects.create(
+                name=f"Performance Product {i}",
+                brand=self.brand,
+                price=10000 + (i * 1000)
+            )
+            self.products.append(product)
+
+    @patch('products.views.ProductDocument.search')
+    def test_search_with_valid_query_performance(self, mock_search):
+        """성능 최적화된 검색 API 테스트"""
+        # 검색 결과 반환
+        mock_hit = MagicMock()
+        mock_hit.meta.id = self.products[0].id
+        mock_search.return_value.query.return_value.execute.return_value = [mock_hit]
+
+        url = reverse('product-search')
+        response = self.client.get(url, {'q': 'performance'})
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        # 검색 결과 구조 검증
+        self.assertIn('results', data)
+        self.assertIn('count', data)
+        self.assertGreater(data['count'], 0)
+
+    @patch('products.views.ProductDocument.search')
+    def test_cache_ttl_dynamic_assignment(self, mock_search):
+        """동적 캐시 TTL 할당 테스트"""
+        # 검색 결과 반환
+        mock_hit = MagicMock()
+        mock_hit.meta.id = self.products[0].id
+        mock_search.return_value.query.return_value.execute.return_value = [mock_hit]
+
+        url = reverse('product-search')
+
+        # 첫 번째 요청 - 캐시 미스, TTL 결정
+        response1 = self.client.get(url, {'q': 'testqueryforttl'})
+        self.assertEqual(response1.status_code, 200)
+
+        # 두 번째 요청 - 캐시 히트
+        response2 = self.client.get(url, {'q': 'testqueryforttl'})
+        self.assertEqual(response2.status_code, 200)
+
+        # 두 응답 모두 동일한 데이터를 반환해야 함
+        self.assertEqual(response1.json()['count'], response2.json()['count'])
+
+
+class ProductSearchOrderPreservationTests(TestCase):
+    """Elasticsearch 검색 결과 순서 보존 단위 테스트"""
+
+    def setUp(self):
+        """테스트 데이터 생성"""
+        self.brand = Brand.objects.create(name="Order Test Brand")
+        self.products = []
+        for i in range(5):
+            product = Product.objects.create(
+                name=f"Order Test Product {i}",
+                brand=self.brand,
+                price=5000 * (i + 1)
+            )
+            self.products.append(product)
+
+    def test_queryset_order_preservation(self):
+        """Django ORM으로 순서 보존 확인"""
+        product_ids = [self.products[3].id, self.products[0].id, self.products[2].id]
+
+        # Case/When을 사용하여 순서 보존
+        from django.db.models import Case, When, Value, IntegerField
+
+        preserved_order = Case(
+            *[When(pk=pk, then=Value(i)) for i, pk in enumerate(product_ids)],
+            output_field=IntegerField()
+        )
+        products = Product.objects.filter(id__in=product_ids).annotate(
+            _order=preserved_order
+        ).order_by('_order')
+
+        result_ids = [p.id for p in products]
+        self.assertEqual(result_ids, product_ids)
